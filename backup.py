@@ -12,35 +12,50 @@ import os
 # Backup config
 #
 
-# Subdirectories of home dir to backup
-BACKUP_DIRS = [
-    "Documents",
-    "Pictures",
-    "Music",
-    "Videos",
-    "build",
-    "AppData/Roaming",
-    "VirtualBox VMs",
+# Subdirectories of home dir to backup.
+BACKUP_DIRS: list[Path] = [
+    Path.home() / "Documents",
+    Path.home() / "Pictures",
+    Path.home() / "Music",
+    Path.home() / "Videos",
+    Path.home() / "VirtualBox VMs",
+    Path.home() / "iso",
+    Path("C:\\Program Files (x86)\\Steam\\steamapps\\common"),
+    Path("C:\\tools"),
 ]
 
-RESTIC_ENV_VARS = {
+RESTIC_CLOUD_CONFIG = {
     # Restic repository location.
     # Here we're using a B2 bucket with the S3-compatible endpoint as
     # recommended over the B2 backend in the documentation
-    "RESTIC_REPOSITORY": "s3:s3.us-east-005.backblazeb2.com/MYBUCKETNAME",
+    "RESTIC_REPOSITORY": "s3:s3.us-east-005.backblazeb2.com/mybucketname",
     # From B2 application key
-    "AWS_ACCESS_KEY_ID": "*************",
-    "AWS_SECRET_ACCESS_KEY": "*********************",
+    "AWS_ACCESS_KEY_ID": "XXXXXXXXXXXXXXXXXXXXXXXXX",
+    "AWS_SECRET_ACCESS_KEY": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
     # For Restic's encryption
-    "RESTIC_PASSWORD": "*************************",
+    "RESTIC_PASSWORD": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+}
+
+RESTIC_LOCAL_WINDOWS_CONFIG = {
+    # Restic repository location.
+    "RESTIC_REPOSITORY": "Z:\\restic",
+    # For Restic's encryption
+    "RESTIC_PASSWORD": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+}
+
+RESTIC_LOCAL_WSL_CONFIG = {
+    # Restic repository location.
+    "RESTIC_REPOSITORY": "/mnt/z/restic",
+    # For Restic's encryption
+    "RESTIC_PASSWORD": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
 }
 
 # Send email on success/error
 EMAIL_ADDRESS = "me@example.com"
-EMAIL_PASSWORD = "*******************"
+EMAIL_PASSWORD = "XXXXXXXXXXXXXXXX"
 
 # Don't back up paths that match these patterns
-EXCLUDE_PATH_PATTERNS = [
+EXCLUDE_PATTERNS = [
     "node_modules/**",
     ".cache/**",
     ".vscode/**",
@@ -62,14 +77,7 @@ def gen_exclude_flags(patterns: list[str]):
 
 
 # Restic flags common to Windows and WSL
-RESTIC_DEFAULT_ARGS = gen_exclude_flags(EXCLUDE_PATH_PATTERNS)
-
-RCLONE_DEST_PATH = Path.home() / "backup"
-RCLONE_BASE = [
-    "rclone",
-    "sync",
-    "--links",
-] + gen_exclude_flags(EXCLUDE_PATH_PATTERNS)
+RESTIC_DEFAULT_ARGS = gen_exclude_flags(EXCLUDE_PATTERNS)
 
 
 class ShellError(Exception):
@@ -127,7 +135,7 @@ def try_task(task_func, error_list):
         error_list.append(e)
 
 
-def backup_windows_dir(dir: Path):
+def backup_windows_dir(config, dir: Path):
     print(f"Snapshotting dir with restic: {dir}")
     cmd = (
         ["restic"]
@@ -135,34 +143,10 @@ def backup_windows_dir(dir: Path):
         + ["backup", str(dir), "--use-fs-snapshot", "--tag", "Windows"]
     )
     env = os.environ.copy()
-    for var, val in RESTIC_ENV_VARS.items():
+    for var, val in config.items():
         env[var] = val
     sh(cmd, env=env)
     print(f"Finished snapshotting dir with restic: {dir}")
-
-
-def backup_aws():
-    ghidra_src = "ghidra:/home/ghidra"
-    ghidra_dst = RCLONE_DEST_PATH / "aws" / "ghidra"
-    ghidra_cmd = RCLONE_BASE + [
-        str(ghidra_src),
-        str(ghidra_dst),
-        "--exclude",
-        ".dotfiles/**",
-    ]
-    sh(ghidra_cmd)
-    print("Downloaded Ghidra community server repository")
-
-    twitchbot_src = "twitchbot:/home/twitchbot"
-    twitchbot_dst = RCLONE_DEST_PATH / "aws" / "twitchbot"
-    twitchbot_cmd = RCLONE_BASE + [
-        str(twitchbot_src),
-        str(twitchbot_dst),
-        "--exclude",
-        ".dotfiles/**",
-    ]
-    sh(twitchbot_cmd)
-    print("Downloaded twitchbot")
 
 
 def commit_notes():
@@ -184,36 +168,49 @@ def wsl_upgrade():
     print("Updated apt packages in WSL")
 
 
-def backup_c_drive(errors):
+def restic_upgrade():
+    sh(["restic", "self-update"])
+
+
+def backup_c_drive(config, errors):
     shuffled_dirs = BACKUP_DIRS.copy()
     random.shuffle(shuffled_dirs)
     for backup_dir in shuffled_dirs:
-        source_path = Path.home() / backup_dir
-        try_task(lambda: backup_windows_dir(source_path), errors)
+        try_task(lambda: backup_windows_dir(config, backup_dir), errors)
     print("Backed up C drive")
 
 
-def backup_wsl():
-    # WSLENV var is list of Windows environment vars to share with WSL.
+def backup_wsl(config):
+    # In case I forgot to kill `restic mount`, don't try to backup the mountpoint... ugh
+    sh(["wsl.exe", "killall", "restic"], check=False)
 
-    # Generate WSLENV
+    # Generate WSLENV, which tells WSL which Windows env vars to pass to WSL
     env = os.environ.copy()
     if "WSLENV" in env:
         wslenv = env["WSLENV"]
     else:
         wslenv = ""
-    for var_name in RESTIC_ENV_VARS.keys():
+    for var_name in config.keys():
         wslenv += f":{var_name}"
     env["WSLENV"] = wslenv
 
-    # Add Restic environment vars to Windows environment to run wsl.exe in
-    for var, val in RESTIC_ENV_VARS.items():
+    # Add Restic environment vars to the custom Windows environment to run wsl.exe in
+    for var, val in config.items():
         env[var] = val
 
     cmd = [
         "wsl.exe",
         "--shell-type",
-        "none", # We don't want bash/zsh to try expanding our exclude glob patterns
+        "none",  # We don't want bash/zsh to try expanding our exclude glob patterns
+        "/home/alex/.local/bin/restic",
+        "self-update",
+    ]
+    sh(cmd, env=env)
+
+    cmd = [
+        "wsl.exe",
+        "--shell-type",
+        "none",  # We don't want bash/zsh to try expanding our exclude glob patterns
         "/home/alex/.local/bin/restic",
         "backup",
         "/home/alex",
@@ -224,24 +221,33 @@ def backup_wsl():
     print("Backed up WSL")
 
 
-def check_restic_integrity():
+def check_restic_integrity(config):
     # TODO once per week, do more complete but time-consuming integrity check
     env = os.environ.copy()
-    for var, val in RESTIC_ENV_VARS.items():
+    for var, val in config.items():
         env[var] = val
     sh(["restic", "check"], env=env)
 
 
-def do_backup_windows():
+def backup_to_restic_repo(restic_win_config, restic_wsl_config, errors):
+    try_task(lambda: backup_c_drive(restic_win_config, errors), errors)
+    try_task(lambda: backup_wsl(restic_wsl_config), errors)
+    try_task(lambda: check_restic_integrity(restic_win_config), errors)
+
+
+def main():
     errors = []
 
+    time.sleep(60)  # Wait for network to come online
+
     try_task(commit_notes, errors)
-    try_task(backup_aws, errors)
     try_task(choco_upgrade, errors)
     try_task(wsl_upgrade, errors)
-    try_task(lambda: backup_c_drive(errors), errors)
-    try_task(backup_wsl, errors)
-    try_task(check_restic_integrity, errors)
+    try_task(restic_upgrade, errors)
+
+    # Actually backup data
+    backup_to_restic_repo(RESTIC_LOCAL_WINDOWS_CONFIG, RESTIC_LOCAL_WSL_CONFIG, errors)
+    backup_to_restic_repo(RESTIC_CLOUD_CONFIG, RESTIC_CLOUD_CONFIG, errors)
 
     if len(errors) == 0:
         notify("Backup succeeded", "Hope you're having a nice day :)")
@@ -254,6 +260,7 @@ def do_backup_windows():
 
 if __name__ == "__main__":
     try:
-        do_backup_windows()
+        main()
     except Exception as e:
         notify("Backup failed: 1 error", e)
+
